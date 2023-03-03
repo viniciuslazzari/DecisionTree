@@ -2,11 +2,18 @@ import pandas as pd
 import math
 
 class Node:
-    def __init__(self, feature: str, threshold: int, left: 'Node' = None, right: 'Node' = None):
+    def __init__(self, feature: str, threshold: int):
         self.feature = feature
         self.threshold = threshold
-        self.left = left
-        self.right = right
+        self.value = None
+        self.left = None
+        self.right = None
+
+    def _minus(self, a: float, b: float) -> bool:
+        return a.astype(float) < b
+
+    def _bigger(self, a: float, b: float) -> bool:
+        return a.astype(float) >= b
 
     def _get_count_outcomes(self, y: pd.Series, search_variable: int) -> int:
         counts = y.value_counts()
@@ -17,55 +24,125 @@ class Node:
         return counts[search_variable]
 
     def _get_entropy(self, bool_variable: float) -> float:
+        if bool_variable in [0, 1]:
+            return 0
+
         not_chance = 1 - bool_variable
 
-        if bool_variable == 0:
-            entropy = -(not_chance * math.log2(not_chance))
-        elif not_chance == 0:
-            entropy = -(bool_variable * math.log2(bool_variable))
-        else:
-            entropy = -(bool_variable * math.log2(bool_variable) + not_chance * math.log2(not_chance))
+        entropy = -(bool_variable * math.log2(bool_variable) + not_chance * math.log2(not_chance))
 
         return entropy
 
-    def _get_remainder_op(self, t_pos, t_neg, s_pos, s_neg) -> float:
-        s_count = s_pos + s_neg
-        count = t_pos + t_neg
+    def _get_positive_distribution(self, y: pd.Series) -> float:
+        num_neg = self._get_count_outcomes(y, 0)
+        num_pos = self._get_count_outcomes(y, 1)
 
-        s_pos_distribution = s_pos / s_count
+        count = num_neg + num_pos
 
-        s_entropy = self._get_entropy(s_pos_distribution)
+        if count == 0:
+            return 0
 
-        return (s_count / count) * s_entropy
+        return num_pos / count
 
-    def _get_remainder_attribute(self, x: pd.Series, y: pd.Series, t_pos: int, t_neg: int) -> float:
-        attribute_values = x.unique()
+    def _get_subset_entropy(self, y: pd.Series) -> float:
+        pos_distribution = self._get_positive_distribution(y)
 
-        total_remainder = 0
+        return self._get_entropy(pos_distribution)
 
-        for value in attribute_values:
-            occurence_indexes = x[x == value].index.tolist()
+    def _get_distribution_threshold(self, x: pd.Series, threshold: float, rule) -> float:
+        subset_x = x[rule(x, threshold)]
 
-            subset_y = y.iloc[occurence_indexes]
+        count_subset = len(subset_x)
 
-            s_neg = self._get_count_outcomes(subset_y, 0)
-            s_pos = self._get_count_outcomes(subset_y, 1)
+        if count_subset == 0:
+            return 0
 
-            remainder = self._get_remainder_op(t_pos, t_neg, s_pos, s_neg)
+        return count_subset / len(x)
 
-            total_remainder += remainder
+    def _get_output_by_threshold(self, x, y, threshold, rule):
+        ocurrences_idx = x[rule(x, threshold)].index.tolist()
 
-        return total_remainder
+        return y.iloc[ocurrences_idx].reset_index(drop = True)
 
-    def _get_attribute_gain(self, x: pd.Series, y: pd.Series, t_pos: int, t_neg: int) -> float:
-        count = t_pos + t_neg
-        pos_distribution = t_pos / count
+    def _get_att_split_information_gain(self, x: pd.Series, y: pd.Series, threshold: int, parent_entropy: float) -> float:
+        percentage_below_average = self._get_distribution_threshold(x, threshold, self._minus)
 
-        total_entropy = self._get_entropy(pos_distribution)
-        total_remainder = self._get_remainder_attribute(x, y, t_pos, t_neg)
+        if percentage_below_average in [0, 1]:
+            return 0
 
-        return total_entropy - total_remainder
+        subset_y_below_threshold = self._get_output_by_threshold(x, y, threshold, self._minus)
+        below_threshold_entropy = self._get_subset_entropy(subset_y_below_threshold)
 
-    def create_tree(self, x: pd.DataFrame, y: pd.Series):
+        percentage_above_average = self._get_distribution_threshold(x, threshold, self._bigger)
+        subset_y_above_threshold = self._get_output_by_threshold(x, y, threshold, self._bigger)
+        above_threshold_entropy = self._get_subset_entropy(subset_y_above_threshold)
 
-        print('dd')
+        return parent_entropy - (percentage_below_average * below_threshold_entropy + percentage_above_average * above_threshold_entropy)
+
+    def _get_best_split(self, x: pd.DataFrame, y: pd.Series):
+        parent_entropy = self._get_subset_entropy(y)
+
+        if parent_entropy == 0:
+            return None, 0, 0
+
+        best_split = None
+        best_threshold = 0
+        information_gain = 0
+
+        for attribute in x.columns:
+            subset_x = x[attribute].astype(float)
+
+            categories = subset_x.unique()
+            
+            if len(categories) == 2:
+                categories = [0.5]
+            else:
+                categories = sorted(categories)[1:]
+
+            for category in categories:
+                attribute_information_gain = self._get_att_split_information_gain(subset_x, y, category, parent_entropy)
+
+                if attribute_information_gain > information_gain:
+                    best_split = attribute
+                    best_threshold = category
+                    information_gain = attribute_information_gain
+
+        return (best_split, best_threshold, information_gain)
+
+    def _get_value_node(self, y: pd.Series) -> int:
+        pos_distribution = self._get_positive_distribution(y)
+
+        return round(pos_distribution)
+
+    def _get_x_y_by_threshold_rule(self, x: pd.DataFrame, y: pd.Series, feature: str, threshold: float, rule):
+        subset_x = x[rule(x[feature], threshold)].reset_index(drop = True)
+        subset_y = self._get_output_by_threshold(x[feature], y, threshold, rule)
+
+        return subset_x, subset_y
+
+    def create_tree(self, x: pd.DataFrame, y: pd.Series, max_depth: int, depth: int = 0) -> 'Node':
+        best_split, threshold, information_gain = self._get_best_split(x, y)
+
+        if depth > max_depth or best_split == None:
+            self.value = self._get_value_node(y)
+            return
+
+        self.feature = best_split
+        self.threshold = threshold
+
+        self.left = Node(None, 0)
+        x_below_threshold, y_below_threshold = self._get_x_y_by_threshold_rule(x, y, best_split, threshold, self._minus)
+        self.left.create_tree(x_below_threshold, y_below_threshold, max_depth, depth + 1)
+
+        self.right = Node(None, 0)
+        x_above_threshold, y_above_threshold = self._get_x_y_by_threshold_rule(x, y, best_split, threshold, self._bigger)
+        self.right.create_tree(x_above_threshold, y_above_threshold, max_depth, depth + 1)
+
+    def make_prediction(self, x: pd.DataFrame):
+        if self.value != None:
+            return self.value
+
+        if (x[self.feature].astype(float) < self.threshold).bool():
+            return self.left.make_prediction(x)
+
+        return self.right.make_prediction(x)
